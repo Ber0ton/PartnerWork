@@ -5,6 +5,7 @@ from torch.utils.data import DataLoader
 from utils.data_loader import read_data, Vocab, SegmentationDataset, collate_fn
 from models.bilstm_segmentation import BiLSTMCRF
 from utils.metrics import compute_metrics
+from torch.utils.tensorboard import SummaryWriter
 import os
 
 
@@ -18,7 +19,7 @@ def save_segmentation(preds, chars, lengths, idx2tag, filename):
             word = []
             for j in range(lengths[i]):
                 char = chars[i][j]
-                tag = idx2tag[preds[i][j]]
+                tag = idx2tag.get(preds[i][j], 'O')  # 使用 'O' 作为默认标签
                 if tag == 'B':
                     if word:
                         words.append(''.join(word))
@@ -85,8 +86,16 @@ def main():
 
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
+    # 创建 SummaryWriter
+    writer = SummaryWriter(log_dir='runs/segmentation_experiment')
+
     # 训练循环
-    num_epochs = 10
+    num_epochs = 120
+    global_step = 0  # 全局步数计数器
+    best_f1 = 0
+    patience = 10
+    trigger_times = 0
+
     for epoch in range(num_epochs):
         model.train()
         total_loss = 0
@@ -97,22 +106,65 @@ def main():
             loss.backward()
             optimizer.step()
             total_loss += loss.item()
+
+            # 记录每个 batch 的损失
+            writer.add_scalar('Train/Loss', loss.item(), global_step)
+            global_step += 1
+
         avg_loss = total_loss / len(train_loader)
         print(f"Epoch {epoch + 1}/{num_epochs}, Loss: {avg_loss:.4f}")
+
+        # 在 TensorBoard 中记录每个 epoch 的平均损失
+        writer.add_scalar('Train/Average_Loss', avg_loss, epoch + 1)
 
         # 评估
         model.eval()
         with torch.no_grad():
             all_preds = []
             all_labels = []
+            all_chars = []
+            all_lengths = []
             for batch_chars, batch_tags, lengths in test_loader:
                 batch_chars, batch_tags, lengths = batch_chars.to(device), batch_tags.to(device), lengths.to(device)
-                preds = model.predict(batch_chars, lengths)  # preds 是一个列表的列表
-                for pred, label, length in zip(preds, batch_tags, lengths):
-                    all_preds.append(pred[:length])  # 使用 append 而非 extend
-                    all_labels.append(label[:length].cpu().numpy())
+                preds = model.predict(batch_chars, lengths)
+                all_preds.extend(preds)
+                all_labels.extend(batch_tags.cpu().numpy())
+                all_lengths.extend(lengths.cpu().numpy())
+
+            # 调试信息
+            total_true = 0
+            total_pred = 0
+            for pred, label, length in zip(all_preds, all_labels, all_lengths):
+                total_true += length
+                total_pred += len(pred)
+                if len(pred) != length:
+                    print(f"长度不匹配 - 预测长度: {len(pred)}, 真实长度: {length}")
+
+            print(f"总真实标签数量: {total_true}, 总预测标签数量: {total_pred}")
+
             precision, recall, f1 = compute_metrics(all_preds, all_labels, vocab.tag2idx)
             print(f"验证集 - 精确率: {precision:.4f}, 召回率: {recall:.4f}, F1值: {f1:.4f}\n")
+
+            # 在 TensorBoard 中记录验证指标
+            writer.add_scalar('Validation/Precision', precision, epoch + 1)
+            writer.add_scalar('Validation/Recall', recall, epoch + 1)
+            writer.add_scalar('Validation/F1', f1, epoch + 1)
+
+            # 早停机制
+            if f1 > best_f1:
+                best_f1 = f1
+                trigger_times = 0
+                os.makedirs('models', exist_ok=True)
+                torch.save(model.state_dict(), 'models/bilstm_segmentation_best.pth')
+                print("保存了最佳模型。")
+            else:
+                trigger_times += 1
+                if trigger_times >= patience:
+                    print("早停机制触发，停止训练。")
+                    break
+
+    # 关闭 SummaryWriter
+    writer.close()
 
     # 保存模型
     os.makedirs('models', exist_ok=True)

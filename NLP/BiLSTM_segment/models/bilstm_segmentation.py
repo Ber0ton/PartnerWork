@@ -3,19 +3,29 @@
 import torch
 import torch.nn as nn
 
-
 class BiLSTMCRF(nn.Module):
-    def __init__(self, vocab_size, tagset_size, embedding_dim=128, hidden_dim=256):
+    def __init__(self, vocab_size, tagset_size, embedding_dim=128, hidden_dim=256, start_tag='<START>', stop_tag='<STOP>'):
         super(BiLSTMCRF, self).__init__()
         self.embedding = nn.Embedding(vocab_size, embedding_dim, padding_idx=0)
         self.lstm = nn.LSTM(embedding_dim, hidden_dim // 2, num_layers=1, bidirectional=True, batch_first=True)
         self.hidden2tag = nn.Linear(hidden_dim, tagset_size)
 
+        self.tagset_size = tagset_size
+        self.start_tag = start_tag
+        self.stop_tag = stop_tag
+
+        # 获取 START 和 STOP 标签的索引
+        self.START_TAG_IDX = 0  # 假设 <START> 的索引为 0
+        self.STOP_TAG_IDX = 1   # 假设 <STOP> 的索引为 1
+
         # Transition matrix for CRF
         self.transitions = nn.Parameter(torch.randn(tagset_size, tagset_size))
+
         # 初始化 transition 的限制，比如禁止某些标签转移
-        self.transitions.data[:, 0] = -10000  # 禁止转移到 <PAD>
-        self.transitions.data[0, :] = -10000  # 禁止从 <PAD> 转移
+        # 禁止从任何标签转移到 <START>
+        self.transitions.data[:, self.START_TAG_IDX] = -10000
+        # 禁止从 <STOP> 转移到任何标签
+        self.transitions.data[self.STOP_TAG_IDX, :] = -10000
 
     def forward(self, sentences, tags, lengths):
         """
@@ -51,11 +61,21 @@ class BiLSTMCRF(nn.Module):
         """
         batch_size, seq_len, tagset_size = emissions.size()
         score = torch.zeros(batch_size).to(emissions.device)
-        tags = torch.cat([torch.full((batch_size, 1), 0, dtype=torch.long).to(emissions.device), tags], dim=1)  # 添加开始符
+
+        # 添加 <START> 标签
+        tags = torch.cat([torch.full((batch_size, 1), self.START_TAG_IDX, dtype=torch.long).to(emissions.device), tags], dim=1)
+
         for i in range(seq_len):
-            emit_score = emissions[range(batch_size), i, tags[:, i + 1]]
-            trans_score = self.transitions[tags[:, i + 1], tags[:, i]]
+            current_tag = tags[:, i + 1]
+            previous_tag = tags[:, i]
+            emit_score = emissions[range(batch_size), i, current_tag]
+            trans_score = self.transitions[current_tag, previous_tag]
             score += emit_score + trans_score
+
+        # 最后转移到 <STOP> 标签
+        last_tag = tags[range(batch_size), lengths]
+        score += self.transitions[self.STOP_TAG_IDX, last_tag]
+
         return score
 
     def _forward_alg(self, emissions, lengths):
@@ -65,16 +85,20 @@ class BiLSTMCRF(nn.Module):
         """
         batch_size, seq_len, tagset_size = emissions.size()
         alpha = torch.full((batch_size, tagset_size), -10000.).to(emissions.device)
-        alpha[:, 0] = 0  # 开始符
+        alpha[:, self.START_TAG_IDX] = 0  # 只允许从 <START> 开始
 
         for i in range(seq_len):
             emit_score = emissions[:, i].unsqueeze(2)  # (batch_size, tagset_size, 1)
             trans_score = self.transitions.unsqueeze(0)  # (1, tagset_size, tagset_size)
             alpha_t = alpha.unsqueeze(1) + trans_score + emit_score  # (batch_size, tagset_size, tagset_size)
             alpha = torch.logsumexp(alpha_t, dim=2)  # (batch_size, tagset_size)
+
             # Mask padding
             mask = (i < lengths).float().unsqueeze(1)
             alpha = alpha * mask + alpha * (1 - mask)
+
+        # 最后一步，转移到 <STOP>
+        alpha = alpha + self.transitions[self.STOP_TAG_IDX].unsqueeze(0)  # (batch_size, tagset_size)
         return torch.logsumexp(alpha, dim=1)
 
     def predict(self, sentences, lengths):
@@ -90,7 +114,7 @@ class BiLSTMCRF(nn.Module):
 
         # 初始化
         viterbi_scores = torch.full((batch_size, tagset_size), -10000.).to(emissions.device)
-        viterbi_scores[:, 0] = 0  # 开始符
+        viterbi_scores[:, self.START_TAG_IDX] = 0
 
         for i in range(seq_len):
             emit_score = emissions[:, i].unsqueeze(2)  # (batch_size, tagset_size, 1)
@@ -102,7 +126,8 @@ class BiLSTMCRF(nn.Module):
             mask = (i < lengths).float().unsqueeze(1)
             viterbi_scores = best_scores * mask + viterbi_scores * (1 - mask)
 
-        # 最后一步
+        # 最后一步，转移到 <STOP>
+        viterbi_scores += self.transitions[self.STOP_TAG_IDX].unsqueeze(0)  # (batch_size, tagset_size)
         best_scores, best_last_tags = torch.max(viterbi_scores, dim=1)  # (batch_size)
 
         # 回溯
@@ -115,8 +140,8 @@ class BiLSTMCRF(nn.Module):
                     continue
                 best_tag = backpointers[i][b][best_tag].item()
                 path.append(best_tag)
-            # 去除开始符
-            path = path[-lengths[b]:]
+            # 移除 <START> 标签并反转
+            path = path[:-1]
             path = path[::-1]
             best_paths.append(path)
         return best_paths

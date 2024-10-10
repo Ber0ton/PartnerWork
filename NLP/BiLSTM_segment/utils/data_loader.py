@@ -7,11 +7,15 @@ from collections import defaultdict
 # 定义标签
 TAG_B = 'B'
 TAG_I = 'I'
-TAG_O = 'O'
 TAG_E = 'E'
 TAG_S = 'S'
+TAG_O = 'O'  # 如果不使用 'O' 标签，可以移除
 
-ALL_TAGS = [TAG_B, TAG_I, TAG_O, TAG_E, TAG_S]
+START_TAG = '<START>'
+STOP_TAG = '<STOP>'
+
+# 包含 START 和 STOP 标签
+ALL_TAGS = [START_TAG, STOP_TAG, TAG_B, TAG_I, TAG_E, TAG_S, TAG_O]
 
 def read_data(file_path):
     """
@@ -38,8 +42,6 @@ def read_data(file_path):
             data.append((characters, tags))
     return data
 
-
-# utils/data_loader.py (继续)
 
 class Vocab:
     """
@@ -71,7 +73,7 @@ class Vocab:
 
         self.idx2char = {idx: char for char, idx in self.char2idx.items()}
 
-        # 建立标签映射
+        # 建立标签映射，确保 <START> 和 <STOP> 标签在标签集中
         self.tag2idx = {tag: idx for idx, tag in enumerate(ALL_TAGS)}
         self.idx2tag = {idx: tag for tag, idx in self.tag2idx.items()}
 
@@ -100,8 +102,6 @@ class SegmentationDataset(Dataset):
         return self.char_ids[idx], self.tag_ids[idx]
 
 
-# utils/data_loader.py (继续)
-
 def collate_fn(batch):
     """
     自定义的 collate_fn，用于动态填充序列。
@@ -120,4 +120,3 @@ def collate_fn(batch):
 
     return torch.tensor(padded_chars, dtype=torch.long), torch.tensor(padded_tags, dtype=torch.long), torch.tensor(
         lengths, dtype=torch.long)
-

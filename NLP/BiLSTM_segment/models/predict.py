@@ -69,8 +69,8 @@ def segment_sentence(model, vocab, sentence):
 
 
 def main():
-    model_path = 'models/bilstm_segmentation.pth'
-    vocab_path = 'data/vocab.txt'  # 已保存的词汇表
+    model_path = r'../models/bilstm_segmentation.pth'
+    vocab_path = r'../data/vocab.txt'  # 已保存的词汇表
     model, vocab = load_model(model_path, vocab_path)
 
     # 示例句子
